@@ -193,12 +193,14 @@ name = "climate-bench-backend"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "flate2",
  "rmp-serde",
  "rust_xlsxwriter",
  "serde",
  "serde_json",
  "tokio",
  "tower-http",
+ "zstd",
 ]
 
 [[package]]
