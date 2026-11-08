@@ -1,0 +1,158 @@
+:root {
+  --bg-primary: #0b0f19;
+  --bg-panel: #111827;
+  --bg-row-even: #0f172a;
+  --bg-row-hover: #1e293b;
+  --border-color: #1f2937;
+  --text-main: #f3f4f6;
+  --text-muted: #9ca3af;
+  --accent-blue: #3b82f6;
+  --accent-green: #10b981;
+  --accent-red: #ef4444;
+  --accent-amber: #f59e0b;
+
+  --row-height: 32px;
+  --header-height: 38px;
+  --footer-height: 36px;
+  --pinned-left-width: 390px;  /* Col 01(70) + Col 02(60) + Col 03(160) + Col 04(100) */
+  --pinned-right-width: 120px; /* Col 28(120) */
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  user-select: none;
+}
+
+html, body, #root {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden; /* no page scroll */
+  background-color: var(--bg-primary);
+  color: var(--text-main);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, monospace;
+  font-size: 12px;
+}
+
+button {
+  background: #1f2937;
+  color: var(--text-main);
+  border: 1px solid #374151;
+  border-radius: 3px;
+  padding: 3px 8px;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+button:hover { background: #374151; }
+button.active { border-color: var(--accent-blue); color: #93c5fd; }
+
+.viewport-shell {
+  display: grid;
+  grid-template-rows: 8vh 32vh 60vh;
+  width: 100vw;
+  height: 100vh;
+  contain: strict;
+}
+
+.viewport-shell.table-only {
+  grid-template-rows: 8vh 92vh;
+}
+
+/* Zone A */
+.zone-a-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-color);
+  gap: 12px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Zone B */
+.zone-b-charts {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 8px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-color);
+  min-height: 0;
+}
+
+.chart-card {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 6px 8px;
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.chart-canvas-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+}
+
+/* canvas sized from its wrapper only; avoids resize feedback loops */
+.chart-canvas-wrap canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Zone C */
+.zone-c-grid-wrapper {
+  display: grid;
+  grid-template-rows: 34px 1fr var(--footer-height);
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-panel);
+}
+
+.virtual-grid-viewport {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  contain: strict;
+  will-change: scroll-position;
+}
+
+.cell-pinned-left {
+  position: sticky;
+  left: 0;
+  z-index: 20;
+  background: var(--bg-panel);
+  border-right: 2px solid #374151;
+  display: flex;
+}
+
+.cell-pinned-right {
+  position: sticky;
+  right: 0;
+  z-index: 20;
+  background: var(--bg-panel);
+  border-left: 2px solid #374151;
+}
+
+.grid-header-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  height: var(--header-height);
+  background: #1e293b;
+  border-bottom: 1px solid #475569;
+}
