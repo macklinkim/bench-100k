@@ -3,6 +3,9 @@
 > **30만 행 × 28열(840만 셀)** 데이터를 Rust 서버에서 수십 ms 안에 직렬화하고,
 > 브라우저에서는 **메인 스레드를 한 번도 50ms 이상 막지 않고** 차트 4종과 2차원 가상화 테이블로 60 FPS 출력하는 벤치마크 서비스입니다.
 
+**🔗 라이브 데모: https://bench-100k.pages.dev** (테이블 전용: https://bench-100k.pages.dev/#table)
+API: `https://bench-backend-638796356878.us-west1.run.app` (Google Cloud Run, us-west1)
+
 ![대시보드](docs/screenshots/dashboard.png)
 
 ---
@@ -28,7 +31,8 @@
 | 가상화 | **@tanstack/solid-virtual** | 행 + 열 **2차원 가상화**. 좌측 4열·우측 1열 고정 |
 | 연산 | **Web Worker + TypedArray** | 디코딩·필터·정렬·집계·CSV 생성을 전부 백그라운드 스레드에서 처리 |
 | 차트 | **Canvas 2D / ImageData** | SVG 노드 0개. 산점도는 픽셀 버퍼에 직접 기록 |
-| 배포(예정) | Koyeb Free(백엔드) + Cloudflare Pages(프론트) | 무과금. 서버 메모리 512MB 제한을 고려해 메모리 설계 |
+| 백엔드 배포 | **Google Cloud Run** (us-west1, 512MiB, 1 vCPU, 0~1 인스턴스) | 6MB `scratch` 이미지라 콜드스타트가 짧고, 요청이 없으면 0대로 줄어 무료 한도 안에서 운영. 원래 계획한 Koyeb는 Mistral 인수 후 신규 무료 플랜이 막혀 변경 |
+| 프론트 배포 | **Cloudflare Pages** | 정적 파일 전 세계 CDN 배포, 무료 |
 
 ## 3. 사용한 데이터
 
@@ -42,7 +46,7 @@
 
 ## 4. 증명한 것 (실측)
 
-측정 환경: Windows 11 개발 PC, release 빌드, localhost, Chromium. 화면 상단 텔레메트리 바에서 같은 값을 실시간으로 볼 수 있습니다.
+측정 환경: 4.1~4.3은 Windows 11 개발 PC(release 빌드, localhost, Chromium), 4.4는 실서비스입니다. 화면 캡처는 실서비스 화면입니다. 화면 상단 텔레메트리 바에서 같은 값을 실시간으로 볼 수 있습니다.
 
 ### 4.1 서버
 
@@ -78,6 +82,24 @@
 
 부수 효과로 필터 연산도 객체 순회 대비 약 6배 빨라졌습니다(19.4ms → 3.0ms, 같은 조건 비교).
 
+배포 사양(저사양 CPU)으로 제한한 컨테이너에서 다시 재 보니, 이번에는 **요청마다 하는 응답 압축**이 병목이었습니다.
+
+| 문제 | 개선 | 효과 |
+|---|---|---|
+| 0.1 vCPU에서 100k 압축 3.3초, 300k 10초 | 데이터가 고정이므로 zstd/gzip 결과를 볼륨별로 **한 번만 만들어 캐시**(`OnceLock`), 기본 화면용 100k는 서버 시작 단계에서 미리 생성 | 캐시 적중 시 100k **12ms**, 300k **29ms** (0.1 vCPU 기준) |
+| 공개 API에서 큰 요청이 몰리면 512MB 초과 위험 | 행 수를 50k/100k/300k로 고정(캐시 크기 상한), JSON 최대 100k, 무거운 요청 동시 2개 제한 | 512MB 제한 컨테이너에서 OOM 없음 |
+
+### 4.4 실서비스 측정 (한국 → Cloud Run us-west1)
+
+| 항목 | 결과 |
+|---|---|
+| 첫 접속 → 100k 표 표시 | **4.2초** (대부분 8.8MB 전송 시간) |
+| 서버 첫 바이트(TTFB, 캐시 적중) | 약 **0.21초** (태평양 왕복 지연 포함) |
+| 300k 로드 | 4.2초, **메인 스레드 Long Task 0건** |
+| 로드 후 렌더링 | 60 FPS, 콘솔 에러 0건 |
+
+로드 시간의 대부분은 네트워크 전송입니다. 서버 처리와 브라우저 처리 시간은 위 표처럼 수십~수백 ms 수준입니다.
+
 ## 5. 화면
 
 ### 대시보드 (`/`)
@@ -105,12 +127,26 @@ npm install
 npm run dev
 ```
 
-API 주소는 `VITE_API_BASE_URL` 환경 변수로 바꿀 수 있습니다(기본 `http://localhost:8000`).
+API 주소는 `VITE_API_BASE_URL` 환경 변수로 바꿀 수 있습니다(개발 기본값 `http://localhost:8000`, 프로덕션 빌드는 `frontend/.env.production`).
+
+배포:
+
+```bash
+# 백엔드 → Cloud Run (이미지는 로컬에서 빌드 후 Artifact Registry로 push)
+IMG=us-west1-docker.pkg.dev/<PROJECT_ID>/bench/backend:v1
+docker build -t $IMG backend && docker push $IMG
+gcloud run deploy bench-backend --image=$IMG --region=us-west1 --allow-unauthenticated \
+  --memory=512Mi --cpu=1 --min-instances=0 --max-instances=1 --cpu-boost
+
+# 프론트 → Cloudflare Pages
+cd frontend && npm run build
+wrangler pages deploy dist --project-name bench-100k --branch main
+```
 
 | API | 설명 |
 |---|---|
 | `GET /health` | 상태 확인 |
-| `GET /api/records?rows=50000\|100000\|300000&format=msgpack\|json` | 데이터. `X-Server-Serialize-Ms` 헤더로 직렬화 시간 반환 |
+| `GET /api/records?rows=50000\|100000\|300000&format=msgpack\|json` | 데이터. `X-Server-Serialize-Ms`(직렬화 시간, 캐시 적중 시 최초 측정값), `X-Cache: HIT\|MISS` 헤더. JSON은 최대 100k |
 | `GET /api/export/xlsx?continent=Asia` | Excel 다운로드 (최대 5만 행) |
 
 ## 7. 구조
@@ -133,6 +169,5 @@ docs/design/   최초 설계서
 
 - 데이터 값은 합성입니다 → OWID 실측 CSV 전처리·내장 예정
 - 압축 후 전송량(300k zstd 26MB)은 소수 데이터 자체의 정보량 때문에 크게 줄지 않습니다. 실제 인터넷에서는 전송 시간이 주 병목입니다 → 파생 컬럼 클라이언트 계산, 정밀도 조정 검토
-- 데이터가 고정이므로 압축 결과를 서버 부팅 시 캐시하면 요청당 CPU를 거의 0으로 만들 수 있습니다(무료 티어 0.1 vCPU 대비)
-- 배포(Koyeb + Cloudflare Pages)는 아직 하지 않았습니다
+- Cloud Run 무료 한도의 전송량은 월 1GB(북미 출발)입니다. 100k 로드 1회가 약 9MB라 초과분은 과금되며, 결제 계정에 예산 알림을 걸어 두었습니다
 - 자동화 테스트는 없습니다. 위 수치는 수동 측정 결과입니다

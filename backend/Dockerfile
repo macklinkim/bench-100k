@@ -1,4 +1,4 @@
-# Static musl binary on an empty base image (Koyeb Free: 512MB RAM, 0.1 vCPU)
+# Static musl binary on an empty base image (Cloud Run: 512MiB, 1 vCPU)
 FROM rust:1-alpine AS builder
 RUN apk add --no-cache musl-dev
 WORKDIR /app

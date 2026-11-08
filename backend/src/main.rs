@@ -29,6 +29,19 @@ async fn main() {
     // force LazyLock init at boot, not on first request
     println!(">>> Rust Climate Bench Backend Initialized (Store Size: {})", GLOBAL_STORE.len());
 
+    // Pre-build the frontend's default response (100k msgpack) BEFORE listening.
+    // Cloud Run (request-based billing) throttles CPU outside requests, so a
+    // background warm-up after bind would starve; startup gets full CPU.
+    for enc in [Enc::Zstd, Enc::Gzip] {
+        let slot = &CACHE[4 + enc as usize]; // volume 1 (100k), msgpack
+        if let Ok((raw, ms)) = serialize(1, false) {
+            if let Ok(body) = compress(&raw, enc) {
+                slot.get_or_init(|| (Bytes::from(body), ms));
+            }
+        }
+    }
+    println!(">>> Cache warmed (100k msgpack zstd+gzip)");
+
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
         .route("/api/records", get(get_records_handler))
@@ -45,24 +58,10 @@ async fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8000".into());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await.unwrap();
     println!(">>> Listening on http://0.0.0.0:{port}");
-
-    // pre-build the frontend's default response (100k msgpack) so the first visitor
-    // after a scale-to-zero cold start doesn't pay the compression cost
-    tokio::task::spawn_blocking(|| {
-        for enc in [Enc::Zstd, Enc::Gzip] {
-            let slot = &CACHE[4 + enc as usize]; // volume 1 (100k), msgpack
-            if let Ok((raw, ms)) = serialize(1, false) {
-                if let Ok(body) = compress(&raw, enc) {
-                    slot.get_or_init(|| (Bytes::from(body), ms));
-                }
-            }
-        }
-        println!(">>> Cache warmed (100k msgpack zstd+gzip)");
-    });
     axum::serve(listener, app).await.unwrap();
 }
 
-// ponytail: fixed cap of 2 concurrent heavy responses to fit Koyeb Free 512MB
+// ponytail: fixed cap of 2 concurrent heavy responses to fit a 512MB instance
 // (each 300k msgpack response peaks ~75MB incl. compression). Raise with RAM.
 static HEAVY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
