@@ -1,3 +1,4 @@
+mod auth;
 mod excel;
 mod model;
 mod store;
@@ -11,14 +12,14 @@ use axum::{
     extract::Query,
     http::{header, HeaderMap, HeaderName, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
-    Router,
+    routing::{get, post},
+    Json, Router,
 };
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::excel::generate_excel_buffer;
-use crate::model::{ClimateRecord, ExportQuery, FetchQuery};
+use crate::model::{ClimateRecord, ExportQuery, FetchQuery, SessionRequest};
 use crate::store::GLOBAL_STORE;
 
 const SERIALIZE_HEADER: &str = "x-server-serialize-ms";
@@ -41,9 +42,13 @@ async fn main() {
         }
     }
     println!(">>> Cache warmed (100k msgpack zstd+gzip)");
+    if !auth::configured() {
+        println!(">>> WARNING: TURNSTILE_SECRET unset - data endpoints will reject every request");
+    }
 
     let app = Router::new()
         .route("/health", get(|| async { "OK" }))
+        .route("/api/session", post(session_handler))
         .route("/api/records", get(get_records_handler))
         .route("/api/export/xlsx", get(export_xlsx_handler))
         .layer(CompressionLayer::new())
@@ -106,7 +111,30 @@ fn compress(raw: &[u8], enc: Enc) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Turnstile token -> short-lived ticket for the data endpoints.
+async fn session_handler(Json(req): Json<SessionRequest>) -> Response {
+    if !auth::configured() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "turnstile not configured").into_response();
+    }
+    if req.token.is_empty() || req.token.len() > 2048 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match auth::verify(&req.token).await {
+        Ok(true) => Json(serde_json::json!({
+            "ticket": auth::issue(),
+            "expires_in": auth::TICKET_TTL.as_secs(),
+        }))
+        .into_response(),
+        Ok(false) => StatusCode::FORBIDDEN.into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
+    }
+}
+
 async fn get_records_handler(Query(q): Query<FetchQuery>, req_headers: HeaderMap) -> Response {
+    // rejected before any work: an unauthenticated request costs ~0 egress
+    if !auth::check(q.ticket.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let json = q.format.as_deref() == Some("json");
     let wanted = q.rows.unwrap_or(100_000);
     let mut vol = VOLUMES.iter().position(|&(r, _)| wanted <= r).unwrap_or(VOLUMES.len() - 1);
@@ -173,6 +201,9 @@ async fn get_records_handler(Query(q): Query<FetchQuery>, req_headers: HeaderMap
 }
 
 async fn export_xlsx_handler(Query(q): Query<ExportQuery>) -> Response {
+    if !auth::check(q.ticket.as_deref()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let Ok(_permit) = HEAVY.acquire().await else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };

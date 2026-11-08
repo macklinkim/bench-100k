@@ -56,6 +56,15 @@ button.active { border-color: var(--accent-blue); color: #93c5fd; }
   contain: strict;
 }
 
+/* Turnstile widget host: invisible unless Cloudflare needs a click */
+.turnstile-box {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 100;
+}
+
 .viewport-shell.table-only {
   grid-template-rows: 8vh 92vh;
 }

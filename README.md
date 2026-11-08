@@ -53,6 +53,7 @@
 | **빠른 응답** | 데이터가 고정이라 압축 결과를 캐시. 캐시 적중 시 서버 처리 수십 ms |
 | **차트-표 교차 필터** | 차트 드래그·클릭, 검색, 정렬이 표·요약·다른 차트에 즉시 반영 (300k 기준 필터+집계 22ms) |
 | **즉시 파일 추출** | CSV/TSV는 브라우저 워커에서, Excel은 Rust 서버에서 생성 |
+| **봇·비용 방어** | Cloudflare Turnstile로 사람 확인을 통과해야 데이터 API를 쓸 수 있음. 직접 호출하는 봇은 401(0바이트)로 거절되어 전송 비용이 생기지 않음 |
 | **무료 인프라** | Cloud Run(요청 없으면 0대) + Cloudflare Pages |
 
 ## 3. 기술 선정과 이유
@@ -70,6 +71,8 @@
 | 차트 | **Canvas 2D / ImageData** | SVG 노드 0개. 산점도는 픽셀 버퍼에 직접 기록 |
 | 백엔드 배포 | **Google Cloud Run** (us-west1, 512MiB, 1 vCPU, 인스턴스 0~1대) | 6MB 이미지라 콜드스타트가 짧고, 요청이 없으면 0대로 줄어 무료 한도 안에서 운영. 원래 계획한 Koyeb는 Mistral 인수 후 신규 무료 플랜이 막혀 변경 |
 | 프론트 배포 | **Cloudflare Pages** | 정적 파일 전 세계 CDN 배포, 무료 |
+| 봇 차단 | **Cloudflare Turnstile** + 서버 검증 | 무료. 대부분의 방문자는 클릭 없이 자동 통과하고, 의심스러운 접속에만 체크박스 표시 |
+| 비밀 관리 | **GCP Secret Manager** | Turnstile 비밀키를 코드·저장소·이미지에 넣지 않고 Cloud Run에 주입 |
 
 ## 4. 사용한 데이터
 
@@ -123,8 +126,9 @@ flowchart LR
 
 ### 5.2 데이터 흐름 (첫 로드)
 
-1. 메인 스레드가 워커에 `FETCH_AND_LOAD` 메시지를 보냅니다.
-2. 워커가 API를 직접 호출합니다. 응답은 서버 캐시에서 바로 나갑니다.
+0. **사람 확인:** 브라우저가 Cloudflare Turnstile 토큰을 받아 `POST /api/session`으로 보냅니다. Rust 서버가 Cloudflare siteverify로 토큰을 검증하고 1시간짜리 입장권(ticket)을 발급합니다. 이후 요청은 입장권으로 통과합니다.
+1. 메인 스레드가 워커에 `FETCH_AND_LOAD` 메시지를 보냅니다(입장권 포함).
+2. 워커가 API를 직접 호출합니다. 서버는 입장권을 먼저 확인하고, 응답은 서버 캐시에서 바로 나갑니다.
 3. 워커가 MessagePack을 디코딩합니다. 행은 28개 값의 배열이고, 순서는 Rust 구조체 필드 순서입니다.
 4. 워커가 **컬럼 스토어**로 변환합니다.
    - 숫자 23개 컬럼: `Float32Array` / `Float64Array` / `Uint32Array`
@@ -148,6 +152,7 @@ flowchart LR
 | 기본 화면용 100k는 서버를 열기 **전에** 미리 압축 | Cloud Run은 요청 처리 중에만 CPU를 주므로, 열고 나서 백그라운드로 하면 CPU를 못 받음 |
 | 무거운 요청 동시 2개 제한(Semaphore), JSON 최대 100k, 행 수는 3종으로 고정 | 공개 API에서 512MB 초과(OOM) 방지, 캐시 크기 상한 |
 | `spawn_blocking` | CPU 작업이 비동기 워커를 막지 않음 |
+| Turnstile 검증 + 입장권 (`src/auth.rs`) | 데이터·Excel API는 입장권이 없으면 작업 전에 401로 거절 → 봇 트래픽의 전송 비용 0. 비밀키가 없으면 입장권을 아예 발급하지 않는 **실패 시 잠김(fail-closed)** 구조 |
 | release 프로필 LTO + strip, 정적 musl 바이너리 + `scratch` 이미지 | 바이너리 3.4MB, 이미지 6MB |
 
 ### 5.4 프론트엔드 설계 포인트
@@ -182,6 +187,11 @@ flowchart LR
 - 셀 안 시각화: 막대, 게이지, 히트맵, 증감 화살표, 배지, 경고색
 - 하단 요약: 필터된 건수, CO₂ 합계, 평균 재생에너지 비중, 평균 탄소집약도
 
+**보안 (봇·비용 방어)**
+- 첫 로드 때 Cloudflare Turnstile 사람 확인. 일반 브라우저는 보통 자동 통과, 의심스러운 접속(자동화 도구 등)에는 체크박스 표시
+- 확인을 통과하면 1시간 입장권이 발급되어 그동안 재확인 없이 데이터 전환·추출 가능
+- 서버가 재시작되어 입장권이 무효가 되면 자동으로 한 번 재확인
+
 **파일 추출**
 - CSV / TSV: 현재 필터·정렬 결과 그대로, 28개 컬럼 전체, UTF-8 BOM 포함(엑셀에서 한글 깨짐 방지), 1만 행 단위로 나눠 조립
 - Excel(.xlsx): 서버에서 생성, 대륙 필터 반영, 헤더 서식 적용, 주요 12개 컬럼, 최대 5만 행
@@ -201,7 +211,7 @@ flowchart LR
 | `▤ 테이블 전용` | 테이블 전용 페이지(`/#table`)로 전환 |
 | `50k (반기)` `100k (분기·MsgPack)` `100k (분기·JSON)` `300k (월간)` | 데이터 볼륨·포맷을 바꿔 다시 로드. MessagePack과 JSON 성능 비교에 사용 |
 | 검색창 | 국가명·ISO 코드로 필터 |
-| 텔레메트리 | 서버직렬화 / 전송량 / 네트워크 / 워커파싱 / 필터·집계 / 추출 / 활성DOM셀 / FPS. 셀 350개 미만·55 FPS 이상이면 녹색 |
+| 텔레메트리 | 인증 / 서버직렬화 / 전송량 / 네트워크 / 워커파싱 / 필터·집계 / 추출 / 활성DOM셀 / FPS. 셀 350개 미만·55 FPS 이상이면 녹색 |
 | `CSV 추출` `TSV 추출` `Excel(.xlsx)` | 현재 결과 파일 다운로드 |
 
 **Zone B — 차트 4종 (높이 32%)**
@@ -249,6 +259,16 @@ flowchart LR
 | 로드 후 렌더링 | **60 FPS**, 콘솔 에러 0건 |
 
 로드 시간의 대부분은 네트워크 전송이고, 서버·브라우저 처리 시간은 수십~수백 ms입니다.
+위 수치는 봇 차단 도입 전 측정값입니다. 도입 후에는 첫 로드에 사람 확인 시간이 더해지며, 로컬에서 Cloudflare 테스트 키로 잰 값은 약 **2.1초**였습니다(스크립트 로드 + 확인 + 서버 검증). 이후 1시간 동안은 추가되지 않습니다.
+
+### 8.1.1 봇 차단 검증 (실서비스)
+
+| 요청 | 결과 |
+|---|---|
+| 입장권 없이 `GET /api/records?rows=300000` | **401, 0바이트** |
+| 입장권 없이 `GET /api/export/xlsx` | **401** |
+| 가짜 토큰으로 `POST /api/session` | **403** (Cloudflare 검증 거절) |
+| 일반 브라우저 / 자동화 브라우저 | 자동 통과 / 체크박스 표시 후 통과, 둘 다 정상 로드 |
 
 ### 8.2 서버 (개발 PC, release 빌드)
 
@@ -310,8 +330,9 @@ flowchart LR
 | API | 설명 |
 |---|---|
 | `GET /health` | 상태 확인 (`OK`) |
-| `GET /api/records?rows=50000\|100000\|300000&format=msgpack\|json` | 데이터. MessagePack은 행마다 28개 값의 배열(필드 순서 = `backend/src/model.rs`), JSON은 객체 배열. 다른 행 수는 가장 가까운 상위 볼륨으로 맞춤, JSON은 최대 100k |
-| `GET /api/export/xlsx?continent=Asia` | Excel 다운로드 (대륙 필터, 최대 5만 행) |
+| `POST /api/session` `{"token": "<Turnstile 토큰>"}` | Cloudflare siteverify로 검증 후 `{"ticket", "expires_in": 3600}` 반환. 실패 403, 비밀키 미설정 503 |
+| `GET /api/records?rows=50000\|100000\|300000&format=msgpack\|json&ticket=<입장권>` | 데이터. 입장권이 없거나 만료되면 401. MessagePack은 행마다 28개 값의 배열(필드 순서 = `backend/src/model.rs`), JSON은 객체 배열. 다른 행 수는 가장 가까운 상위 볼륨으로 맞춤, JSON은 최대 100k |
+| `GET /api/export/xlsx?continent=Asia&ticket=<입장권>` | Excel 다운로드 (대륙 필터, 최대 5만 행). 입장권 필수 |
 
 응답 헤더:
 - `X-Server-Serialize-Ms`: 직렬화 시간. 캐시 적중 시에는 최초 측정값입니다.
@@ -324,8 +345,9 @@ flowchart LR
 
 ```bash
 # 백엔드 (http://localhost:8000)
+# 로컬에서는 Cloudflare 공식 테스트 비밀키(항상 통과)를 씁니다. 없으면 데이터 API가 모두 401입니다.
 cd backend
-cargo run --release
+TURNSTILE_SECRET=1x0000000000000000000000000000000AA cargo run --release
 
 # 프론트엔드 (http://localhost:3000)
 cd frontend
@@ -333,7 +355,7 @@ npm install
 npm run dev
 ```
 
-API 주소는 `VITE_API_BASE_URL` 환경 변수로 바꿉니다(개발 기본값 `http://localhost:8000`, 프로덕션 빌드는 `frontend/.env.production`).
+API 주소는 `VITE_API_BASE_URL`, Turnstile sitekey는 `VITE_TURNSTILE_SITEKEY`로 바꿉니다. 개발 기본값은 `http://localhost:8000`과 Cloudflare 테스트 sitekey이고, 프로덕션 값은 `frontend/.env.production`에 있습니다(둘 다 공개값).
 
 ### 배포
 
@@ -342,7 +364,8 @@ API 주소는 `VITE_API_BASE_URL` 환경 변수로 바꿉니다(개발 기본값
 IMG=us-west1-docker.pkg.dev/<PROJECT_ID>/bench/backend:v1
 docker build -t $IMG backend && docker push $IMG
 gcloud run deploy bench-backend --image=$IMG --region=us-west1 --allow-unauthenticated \
-  --memory=512Mi --cpu=1 --min-instances=0 --max-instances=1 --cpu-boost
+  --memory=512Mi --cpu=1 --min-instances=0 --max-instances=1 --cpu-boost \
+  --set-secrets=TURNSTILE_SECRET=turnstile-secret:latest   # Secret Manager에 저장한 Turnstile 비밀키
 
 # 프론트 → Cloudflare Pages
 cd frontend && npm run build
@@ -355,11 +378,13 @@ wrangler pages deploy dist --project-name bench-100k --branch main
 backend/                       Rust (Axum)
   Dockerfile                   정적 musl 빌드 → scratch 이미지 (6MB)
   src/main.rs                  라우터, 압축 캐시, 동시성 제한, CORS, 타이밍 헤더
+  src/auth.rs                  Turnstile 검증(siteverify) + 입장권 발급·확인
   src/model.rs                 28컬럼 ClimateRecord (필드 순서 = MessagePack 전송 순서)
   src/store.rs                 합성 데이터 생성 + 월 단위 선형 보간 (LazyLock 상주)
   src/excel.rs                 rust_xlsxwriter Excel 생성
 frontend/                      SolidJS + Vite
   src/App.tsx                  화면 셸, 텔레메트리, 페이지 전환, 워커 연결
+  src/turnstile.ts             Turnstile 위젯 → 입장권 발급·캐시·재발급
   src/state/gridSchema.ts      컬럼 메타데이터(라벨·폭·표시 방식), 공용 타입
   src/state/columns.ts         컬럼 스토어 (TypedArray + 사전 인코딩, 행 조립)
   src/worker/dataEngine.worker.ts  디코딩·필터·정렬·집계·CSV/TSV
@@ -374,7 +399,9 @@ docs/screenshots/              README 화면 캡처 (실서비스)
 
 - **데이터:** 값은 합성입니다 → OWID 실측 CSV 전처리·내장 예정
 - **전송량:** 압축 후 전송량(300k zstd 26MB)은 소수 데이터 자체의 정보량 때문에 크게 줄지 않습니다. 실제 인터넷에서는 전송 시간이 주 병목입니다 → 파생 컬럼을 클라이언트에서 계산, 정밀도 조정 검토
-- **비용:** Cloud Run 무료 전송량은 월 1GB(북미 출발)입니다. 100k 로드 1회가 약 9MB라 초과분은 과금되며, 결제 계정에 예산 알림을 걸어 두었습니다
+- **비용:** Cloud Run 무료 전송량은 월 1GB(북미 출발)입니다. 100k 로드 1회가 약 9MB라 초과분은 과금되며, 결제 계정에 예산 알림을 걸어 두었습니다. 봇의 직접 호출은 Turnstile로 막았지만, 사람 확인을 통과한 방문자의 정상 사용량은 그대로 과금 대상입니다
+- **입장권 저장 위치:** 입장권은 서버 메모리에 있어 인스턴스 1대(`max-instances=1`)일 때만 맞게 동작합니다. 여러 대로 늘리려면 서명된(HMAC) 입장권으로 바꿔야 합니다
+- **인증 시간:** 위 2.1초는 로컬 테스트 키 기준이며, 실서비스 실제 키로 따로 재지는 않았습니다
 - **콜드스타트:** 요청이 없으면 인스턴스가 0대로 줄어, 이후 첫 접속은 서버 시작 시간만큼 늦어집니다(로컬 측정 1.4초, 실서비스 미측정)
 - **화면 크기:** DOM 셀 350개 미만 목표는 1920×1080 대시보드 기준입니다. 더 큰 화면이나 테이블 전용 화면에서는 넘습니다
 - **Excel:** 대륙 필터만 반영되고 연도·검색 필터는 반영되지 않습니다(주요 12개 컬럼, 최대 5만 행)

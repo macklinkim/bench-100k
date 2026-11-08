@@ -3,6 +3,7 @@ import type { ChartData, FilterCriteria, Summary } from './state/gridSchema';
 import type { Columns } from './state/columns';
 import { ZoneBChartCluster } from './components/ZoneBChartCluster';
 import { ZoneCVirtualGrid } from './components/ZoneCVirtualGrid';
+import { dropTicket, getTicket } from './turnstile';
 import './styles/viewport.css';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
@@ -20,7 +21,7 @@ export default function App() {
   const [activeIndices, setActiveIndices] = createSignal<Uint32Array>(new Uint32Array(0));
   const [chartData, setChartData] = createSignal<ChartData | null>(null);
   const [summary, setSummary] = createSignal<Summary>({ filteredCount: 0, sumCo2: 0, avgRenewables: 0, avgIntensity: 0 });
-  const [telemetry, setTelemetry] = createSignal({ serverSerializeMs: 0, netMs: 0, parseMs: 0, filterMs: 0, payloadBytes: 0, exportMs: 0, exportBytes: 0 });
+  const [telemetry, setTelemetry] = createSignal({ authMs: 0, serverSerializeMs: 0, netMs: 0, parseMs: 0, filterMs: 0, payloadBytes: 0, exportMs: 0, exportBytes: 0 });
   const [fps, setFps] = createSignal(60);
   const [domCellCount, setDomCellCount] = createSignal(0);
   const [loading, setLoading] = createSignal('');
@@ -45,6 +46,7 @@ export default function App() {
       setTelemetry((prev) => ({ ...prev, ...msg.telemetry }));
       setLoading('');
       setError('');
+      retried = false;
       requestAnimationFrame(() => setDomCellCount(document.querySelectorAll('.grid-cell').length));
     }
     if (msg.type === 'EXPORT_READY') {
@@ -57,19 +59,38 @@ export default function App() {
       setTimeout(() => URL.revokeObjectURL(msg.url), 10_000); // immediate revoke can cancel the download
     }
     if (msg.type === 'ERROR') {
+      // 401 = ticket unknown to the server (e.g. instance restarted): re-check once
+      if (String(msg.message).includes('401') && !retried) {
+        retried = true;
+        dropTicket();
+        fetchDataset(dataset());
+        return;
+      }
       setLoading('');
       setError(`데이터 로드 실패: ${msg.message} (백엔드 ${API_BASE} 실행 여부 확인)`);
     }
   };
   onCleanup(() => worker.terminate());
 
-  const fetchDataset = (idx: number) => {
+  let retried = false;
+  const fetchDataset = async (idx: number) => {
     const { rows, format } = DATASETS[idx];
     setDataset(idx);
+    setLoading('사람 확인 중...');
+    let ticket: string;
+    try {
+      const t0 = performance.now();
+      ticket = await getTicket();
+      setTelemetry((prev) => ({ ...prev, authMs: performance.now() - t0 }));
+    } catch (err) {
+      setLoading('');
+      setError(String(err));
+      return;
+    }
     setLoading(`${rows.toLocaleString()}건 ${format} 로딩 중...`);
     worker.postMessage({
       type: 'FETCH_AND_LOAD',
-      payload: { url: `${API_BASE}/api/records?rows=${rows}&format=${format}`, format, criteria: criteria() },
+      payload: { url: `${API_BASE}/api/records?rows=${rows}&format=${format}&ticket=${ticket}`, format, criteria: criteria() },
     });
   };
 
@@ -81,7 +102,15 @@ export default function App() {
 
   const triggerExport = (ext: 'csv' | 'tsv' | 'xlsx') => {
     if (ext === 'xlsx') {
-      window.open(`${API_BASE}/api/export/xlsx?continent=${encodeURIComponent(criteria().continent || '')}`, '_blank');
+      getTicket().then(
+        (ticket) => {
+          // attachment response: the browser downloads it without leaving the page
+          const a = document.createElement('a');
+          a.href = `${API_BASE}/api/export/xlsx?continent=${encodeURIComponent(criteria().continent || '')}&ticket=${ticket}`;
+          a.click();
+        },
+        (err) => setError(String(err))
+      );
       return;
     }
     setLoading(`${ext.toUpperCase()} 생성 중...`);
@@ -139,6 +168,7 @@ export default function App() {
         <div style={{ display: 'flex', gap: '14px', 'font-family': 'monospace', 'white-space': 'nowrap' }}>
           <Show when={error() || loading()} fallback={
             <>
+              <span>인증: <b>{telemetry().authMs.toFixed(0)}ms</b></span>
               <span>서버직렬화: <b>{telemetry().serverSerializeMs.toFixed(1)}ms</b></span>
               <span>전송량: <b>{mb(telemetry().payloadBytes)}MB</b></span>
               <span>네트워크: <b>{telemetry().netMs.toFixed(0)}ms</b></span>

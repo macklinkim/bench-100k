@@ -40,9 +40,16 @@ pub struct ClimateRecord {
 pub struct FetchQuery {
     pub rows: Option<usize>,    // 50000 | 100000 | 300000
     pub format: Option<String>, // "msgpack" | "json"
+    pub ticket: Option<String>, // from POST /api/session (Turnstile)
 }
 
 #[derive(Deserialize)]
 pub struct ExportQuery {
     pub continent: Option<String>,
+    pub ticket: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SessionRequest {
+    pub token: String, // Turnstile response token
 }
